@@ -1,0 +1,220 @@
+/*
+ * Copyright (c) 2018.  This file is subject to the terms and conditions defined in file 'LICENSE.txt', which is part of this source code package.
+ */
+
+package com.whitebeluga.origami.loosen.chunkloosening
+
+import com.google.common.annotations.VisibleForTesting
+import com.moduleforge.libraries.geometry._3d.Line
+import com.moduleforge.libraries.geometry._3d.Line.linePassingBy
+import com.moduleforge.libraries.geometry._3d.Vector
+import com.whitebeluga.origami.figure.Bundle
+import com.whitebeluga.origami.figure.Bundle.Side.TOP
+import com.whitebeluga.origami.figure.Figure
+import com.whitebeluga.origami.figure.component.Face
+import com.whitebeluga.origami.figure.component.Vertex
+import com.whitebeluga.origami.figure.folding.rotating.bundlerotation.BundleRotator.Companion.makeRotator
+import com.whitebeluga.origami.loosen.Constants.DEFAULT_OPEN_UP_ANGLE
+import com.whitebeluga.origami.loosen.chunkloosening.chunktreemaking.ChunkTreeMaker
+
+/**
+ * Opens up the chunks of the figure
+ */
+internal class ChunkLoosener(val figure: Figure) {
+   /**
+    * As we rotate the different bundles, keep track of the original vertices and their rotations with this map.
+    *
+    * This is to avoid duplicating vertices at boundaries. That is, when rotating two bundles that are joined
+    * by a boundary the vertices at said boundary ought to be the same objects.
+    */
+   private val mapOfVertexToRotatedVertex: MutableMap<Vertex, Vertex> = mutableMapOf()
+   private val mapOfChunkToRotatedBundle: MutableMap<Chunk, Bundle> = mutableMapOf()
+   val loosenedFigure: Figure
+
+   init {
+      val chunkTreeMaker = ChunkTreeMaker(figure)
+      val root = chunkTreeMaker.makeChunkTree()
+      val isJustOneChunk = root.isLeaf()
+      loosenedFigure =
+         if(isJustOneChunk) {
+            figure
+         } else {
+            val loosened = makeLoosenedBundles(root)
+            Figure(loosened)
+         }
+   }
+   private fun makeLoosenedBundles(root: Chunk): Set<Bundle> {
+      initMapsFromRootChunk(root)
+      makeBundlesOfChildren(root)
+      return mapOfChunkToRotatedBundle.values.toSet()
+   }
+   private fun initMapsFromRootChunk(root: Chunk) {
+      val rootAsBundle = root.makeBundle()
+      mapOfChunkToRotatedBundle[root] = rootAsBundle
+      val initialVertexToRotated = rootAsBundle.vertices.map { it to it }
+      mapOfVertexToRotatedVertex.putAll(initialVertexToRotated)
+   }
+   private fun makeBundlesOfChildren(chunk: Chunk, rotations: List<Rotation> = listOf()) {
+      if(chunk.isLeaf())
+         return
+      makeBundlesOfInternalChildren(chunk, rotations)
+      makeBundlesOfInterBundleChildren(chunk, rotations)
+   }
+   private fun makeBundlesOfInternalChildren(chunk: Chunk, rotations: List<Rotation>) {
+      for( (child, _) in  chunk.internallyConnectedChunks ) {
+
+         val rotationCalculator = InternalChunkRotationCalculator(child, chunk)
+         val chunkRotation = rotationCalculator.calculateRotation()
+         val newRotations = rotations + chunkRotation
+
+         makeBundleFromChunk(chunk, newRotations)
+         makeBundlesOfChildren(chunk, newRotations)
+      }
+   }
+   private fun makeBundlesOfInterBundleChildren(chunk: Chunk, rotations: List<Rotation>) =
+           chunk.interBundleConnectedChunks.forEach { (child, _)->
+              makeSubtree(child, rotations)
+           }
+   /**
+    * 1. Makes a new bundle
+    * 2. Updates the bundle map and the vertex map.
+    * 3. Recursively make bundle of children
+    */
+   private fun makeSubtree(chunk: Chunk, rotations: List<Rotation>) {
+      makeBundleFromChunk(chunk, rotations)
+      makeBundlesOfChildren(chunk, rotations)
+   }
+   private fun makeBundleFromChunk(chunk: Chunk, rotations: List<Rotation>) {
+      if (rotations.isEmpty()) {
+         mapOfChunkToRotatedBundle[chunk] = chunk.makeBundle()
+      } else {
+         val rotatedBundle = rotateChunk(chunk, rotations)
+         mapOfChunkToRotatedBundle[chunk] = rotatedBundle.first
+         updateMapOfVertexToRotated(rotatedBundle.second)
+      }
+   }
+   /**
+    * Rotates a chunk and makes a bundle where existing vertices have been replaced.
+    * Returns the bundle and the map of vertex to rotated vertex
+    */
+   private fun rotateChunk(chunk: Chunk, rotations: List<Rotation>): Pair<Bundle, Map<Vertex, Vertex>> {
+      val rotated = rotate(chunk, rotations)
+      val rotatedBundle = rotated.first
+      val originalVerticesToRotated = rotated.second
+      val vertexReplacer = RotatedBundleVertexReplacer(rotatedBundle, originalVerticesToRotated)
+      val rotatedAndBoundaryVerticesReplaced = vertexReplacer.replaceVertices()
+      val verticesOfNewBundle = rotatedAndBoundaryVerticesReplaced.vertices
+      val originalVerticesToRotatedMinusReplaced =
+              originalVerticesToRotated.filterValues { verticesOfNewBundle.contains(it) }
+      return Pair(rotatedAndBoundaryVerticesReplaced, originalVerticesToRotatedMinusReplaced)
+   }
+   private fun updateMapOfVertexToRotated(newVertexToRotated: Map<Vertex, Vertex>) {
+      newVertexToRotated.forEach { v, r -> mapOfVertexToRotatedVertex.putIfAbsent(v, r) }
+   }
+   companion object {
+      private fun rotate(chunk: Chunk, rotations: List<Rotation>): Pair<Bundle, Map<Vertex, Vertex>> {
+         val bundle = chunk.makeBundle()
+         return doRotations(rotations, bundle)
+      }
+      /**
+       * Rotates the bundle doing one rotation at a time, starting with the first of the list.
+       *
+       * Returns both the rotated bundle and the mapping of original vertices to the vertices of the rotated bundle.
+       */
+      @VisibleForTesting
+      internal fun doRotations(rotations: List<Rotation>, bundle: Bundle,
+                               originalToVertex: Map<Vertex, Vertex>? = null ): Pair<Bundle, Map<Vertex, Vertex>> {
+         if(rotations.isEmpty())
+            return Pair(bundle, originalToVertex!!)
+         val nextRotation = rotations.first()
+         val rotator = makeRotator(angle = nextRotation.angle, bundles = setOf(bundle),
+                 line = nextRotation.line, rotationDirection = nextRotation.rotationDirection)
+         val rotatedBundle = rotator.rotateBundles().first()
+         val vertexToRotated = rotator.mapOfVertexToRotatedVertex
+         val originalToRotated = originalToVertex?.map {
+            (original, vertex) ->
+            original to vertexToRotated[vertex]!! }?.toMap() ?: vertexToRotated
+         return doRotations(rotations.drop(1), rotatedBundle, originalToRotated)
+      }
+   }
+   class Rotation(val line: Line, val rotationDirection: Vector, val angle: Double)
+
+   /**
+    * Internal chunks (as opposed to interbundle chunks) are the ones that originate new rotations.
+    * Consider that interbundle chunks do not need to be "opened". They already are, by definition.
+    *
+    */
+   inner class InternalChunkRotationCalculator(private val chunk: Chunk, private val parentChunk: Chunk) {
+      fun calculateRotation(): Rotation {
+         val internalBoundaryWithParent = parentChunk.internallyConnectedChunks[chunk]!!
+         val rotatedParentBundle = this@ChunkLoosener.mapOfChunkToRotatedBundle[parentChunk]!!
+         return calculateRotation(internalBoundaryWithParent.first, internalBoundaryWithParent.second, rotatedParentBundle)
+      }
+      private fun calculateRotation(sideWithRespectToParent: Bundle.Side,
+                                    unrotatedBoundaryWithParent: ChunkBoundary,
+                                    rotatedParentBundle: Bundle): Rotation {
+         val rotationLine = calculateLineOfRotatedInternalBoundary(unrotatedBoundaryWithParent)
+         return calculateRotation(sideWithRespectToParent, rotationLine, rotatedParentBundle)
+      }
+      private fun calculateLineOfRotatedInternalBoundary(unrotatedInternalBoundary: ChunkBoundary): Line {
+         val randomEdge = unrotatedInternalBoundary.edges.first()
+         val verticesOfEdge = randomEdge.vertices
+         val rotatedEdgeEnd1 = this@ChunkLoosener.mapOfVertexToRotatedVertex[verticesOfEdge[0]]!!
+         val rotatedEdgeEnd2 = this@ChunkLoosener.mapOfVertexToRotatedVertex[verticesOfEdge[1]]!!
+         return linePassingBy(rotatedEdgeEnd1, rotatedEdgeEnd2)
+      }
+      private fun calculateRotation(sideWithRespectToParent: Bundle.Side, rotationLine: Line, rotatedParentBundle: Bundle): Rotation {
+         val rotationDirection = if(sideWithRespectToParent == TOP)
+            rotatedParentBundle.normal
+         else
+            rotatedParentBundle.normal.negate()
+         return Rotation(rotationLine, rotationDirection, DEFAULT_OPEN_UP_ANGLE)
+      }
+   }
+   /**
+    * Those faces of the bundle that had vertices in common (before rotation) with the parent bundle,
+    * are included in the map returned with the vertices replaced.
+    *
+    * If the bundle was indeed rotated, or any ancestor was rotated then for sure there are vertices that need
+    * to be replaced: all those at the boundary.
+    *
+    * Otherwise the face is not included in the map. In other words, the map only contains those faces
+    * for which one or more vertex replacement were done.
+    */
+   inner class RotatedBundleVertexReplacer(private val rotated: Bundle, private val vertexToRotated: Map<Vertex, Vertex>) {
+      val faces = rotated.faces
+      fun replaceVertices(): Bundle {
+         val faceToNewFace = replaceVerticesInFaces()
+         val newFaces = faces.map { faceToNewFace[it] ?: it }.toSet()
+         val faceToFacesAbove = rotated.facesToFacesAbove
+         val newFaceToFacesAbove = faceToFacesAbove.map { (face, facesAbove) ->
+            (faceToNewFace[face] ?: face) to facesAbove.map {  faceToNewFace[it] ?: it }.toSet()
+         }.toMap()
+         return Bundle(rotated.plane, newFaces, newFaceToFacesAbove)
+      }
+      private fun replaceVerticesInFaces(): Map<Face, Face> {
+         val rotatedToOriginal = vertexToRotated.entries.associateBy({ it.value }) { it.key }
+         return replaceVerticesInFaces(rotatedToOriginal)
+      }
+      private fun replaceVerticesInFaces(rotatedToOriginal: Map<Vertex, Vertex>): Map<Face, Face> {
+         val replaceableVertices = this@ChunkLoosener.mapOfVertexToRotatedVertex.keys
+         val faceToNewFace = mutableMapOf<Face, Face>()
+         for(face in faces) {
+            val vertices = face.vertices
+            val originalVertices = vertices.map {rotatedToOriginal[it]!!}
+            val thereAreNoVerticesToReplace = replaceableVertices.intersect(originalVertices).isEmpty()
+            if(thereAreNoVerticesToReplace)
+               continue
+            val newVertices = replaceVerticesOfFace(vertices, originalVertices)
+            faceToNewFace[face] = Face(newVertices, face.colors)
+         }
+         return faceToNewFace
+      }
+      private fun replaceVerticesOfFace(rotatedVertices: List<Vertex>, originalVertices: List<Vertex>): List<Vertex> =
+         rotatedVertices.withIndex().map {
+            (index, rotatedVertex) ->
+            val originalVertex = originalVertices[index]
+            this@ChunkLoosener.mapOfVertexToRotatedVertex[originalVertex] ?: rotatedVertex
+         }
+   }
+}

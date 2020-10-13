@@ -28,7 +28,7 @@
 		<kotlin.version>1.2.61</kotlin.version>
 		<log4j.version>2.9.0</log4j.version>
 		<spring.version>4.3.9.RELEASE</spring.version>
-		<junit.version>4.12</junit.version>
+		<junit.version>4.13.1</junit.version>
 		<origami.version>0.0.2-SNAPSHOT</origami.version>
 		<guava.version>23.0</guava.version>
 		<origami.version>0.0.2-SNAPSHOT</origami.version>

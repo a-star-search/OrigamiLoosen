@@ -25,7 +25,7 @@
 	<description>A collection of algorithms to transform an ideal flat figure into a loosened, slightly open 3D version of it</description>
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<kotlin.version>1.2.61</kotlin.version>
+		<kotlin.version>1.6.0</kotlin.version>
 		<log4j.version>2.9.0</log4j.version>
 		<spring.version>4.3.9.RELEASE</spring.version>
 		<junit.version>4.12</junit.version>
